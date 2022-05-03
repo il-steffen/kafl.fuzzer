@@ -127,7 +127,7 @@ class InputQueue:
         if not entry:
             return True, None
         old_node, old_val = entry
-        better_bits = val > old_val and node.get_score() <= old_node.get_score()
+        better_bits = val == old_val and node.get_score() <= old_node.get_score()
         better_score = val == old_val and node.get_score() < old_node.get_score()
         if better_bits or better_score:
             return True, old_node
@@ -138,6 +138,8 @@ class InputQueue:
         for (index, val) in enumerate(bitmap.cbuffer):
             if val == 0x0:
                 continue
+            # consider favorites per bit, not just per byte?
+            index = index*val.bit_length()
             overwrite, old_node = self.should_overwrite_old_entry(index, val, new_node)
             if overwrite:
                 self.bitmap_index_to_fav_node[index] = (new_node, val)
