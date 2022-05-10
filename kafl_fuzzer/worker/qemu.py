@@ -473,10 +473,10 @@ class qemu:
         # record highest seen BBs
         self.bb_seen = max(self.bb_seen, result.bb_cov)
 
-        #runtime = result.runtime_sec + result.runtime_usec/1000/1000
+        runtime = result.runtime_sec + result.runtime_usec/1000/1000
         res = ExecutionResult(
                 self.c_bitmap, self.bitmap_size,
-                self.exit_reason(result), time.time() - start_time)
+                self.exit_reason(result), runtime)
 
         if result.exec_code == RC.STARVED:
             res.starved = True
