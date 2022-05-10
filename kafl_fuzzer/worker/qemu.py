@@ -269,6 +269,7 @@ class qemu:
         try:
             self.__qemu_connect()
             self.__qemu_handshake()
+            self.__qemu_dry_run()
         except (OSError, BrokenPipeError, QemuIOException) as e:
             if not self.exiting:
                 self.logger.error("Failed to connect to Qemu: %s", str(e))
@@ -293,6 +294,16 @@ class qemu:
 
     def wait_qemu(self):
         self.control.recv(1)
+
+    def __qemu_dry_run(self):
+
+        self.set_payload(b'')
+        self.set_timeout(0.1)
+
+        self.run_qemu()
+        result = self.qemu_aux_buffer.get_result()
+        if result.exec_code == RC.ABORT:
+            self.handle_habort()
 
     def __qemu_handshake(self):
 
