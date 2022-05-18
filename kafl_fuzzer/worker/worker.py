@@ -11,18 +11,23 @@ Each Worker is associated with a single Qemu instance for executing fuzz inputs.
 """
 
 import os
+import struct
 import time
 import signal
 import sys
 import shutil
 import tempfile
 import logging
+
+from kafl_fuzzer.technique.syx.request import SyxRequest
+import psutil
 import lz4.frame as lz4
 
 #from kafl_fuzzer.common.config import FuzzerConfiguration
 from kafl_fuzzer.common.rand import rand
+from kafl_fuzzer.common.util import atomic_write
 from kafl_fuzzer.manager.bitmap import BitmapStorage, GlobalBitmap
-from kafl_fuzzer.manager.communicator import ClientConnection, MSG_IMPORT, MSG_RUN_NODE, MSG_BUSY
+from kafl_fuzzer.manager.communicator import ClientConnection, MSG_IMPORT, MSG_RUN_NODE, MSG_BUSY, MSG_IMPORT_SYX, MSG_SYM_REQUEST
 from kafl_fuzzer.manager.node import QueueNode
 from kafl_fuzzer.manager.statistics import WorkerStatistics
 from kafl_fuzzer.worker.state_logic import FuzzingStateLogic
@@ -30,36 +35,40 @@ from kafl_fuzzer.worker.qemu import QemuIOException
 from kafl_fuzzer.worker.qemu import qemu as Qemu
 from kafl_fuzzer.common.logger import WorkerLogAdapter
 
-def worker_loader(pid, config):
-    worker = WorkerTask(pid, config)
+def worker_loader(pid, config, syx_mode):
+    if syx_mode:
+        logger.debug("Worker-%02d PID: %d" % (pid, os.getpid()))
+    else:
+        logger.debug("SYX Worker-%02d PID: %d" % (pid, os.getpid()))
+    worker = WorkerTask(pid, config, syx_mode=syx_mode)
     worker.start()
 
 class WorkerTask:
-
-    def __init__(self, pid, config):
+    def __init__(self, pid, config, syx_mode = False):
         self.config = config
         self.pid = pid
         self.logger_no_prefix = logging.getLogger(__name__)
         self.logger = WorkerLogAdapter(self.logger_no_prefix, {'pid': self.pid})
 
-        self.q = Qemu(self.pid, self.config)
-        self.conn = ClientConnection(pid, config)
+        self.q = Qemu(self.pid, self.config, syx_mode=syx_mode)
+        self.conn = ClientConnection(pid, config, syx_mode)
         self.statistics = WorkerStatistics(self.pid, config)
         self.logic = FuzzingStateLogic(self, config)
         self.bitmap_storage = BitmapStorage(self.config, "main")
 
+        self.syx_mode = syx_mode
         self.payload_limit = self.q.get_payload_limit()
         self.t_hard = config.timeout_hard
         self.t_soft = config.timeout_soft
         self.t_check = config.timeout_check
         self.num_funky = 0
 
-    def handle_import(self, msg):
+    def handle_import(self, msg, syx = False):
         meta_data = {"state": {"name": "import"}, "id": 0}
         payload = msg["task"]["payload"]
         self.q.set_timeout(self.t_hard)
         try:
-            self.logic.process_import(payload, meta_data)
+            self.logic.process_import(payload, meta_data, syx)
         except QemuIOException:
             self.logger.warn("%s: Execution failure on import.", self)
             self.conn.send_node_abort(None, None)
@@ -70,14 +79,20 @@ class WorkerTask:
         busy_timeout = 4
         kickstart = self.config.kickstart
 
-        if kickstart:
-            self.logger.debug("No inputs in queue, attempting kickstart(%d)..", kickstart)
-            self.q.set_timeout(self.t_hard)
-            self.logic.process_kickstart(kickstart)
-        else:
-            self.logger.info("No inputs in queue, sleeping %ds..", busy_timeout)
+        if self.syx_mode:
+            self.logger.debug("No symbolic inputs in queue, sleeping %ds.." % (busy_timeout))
             time.sleep(busy_timeout)
-        self.conn.send_ready()
+
+            self.conn.send_sym_wait()
+        else:
+            if kickstart:
+                self.logger.debug("No inputs in queue, attempting kickstart(%d)..", kickstart)
+                self.q.set_timeout(self.t_hard)
+                self.logic.process_kickstart(kickstart)
+            else:
+                self.logger.info("No inputs in queue, sleeping %ds..", busy_timeout)
+                time.sleep(busy_timeout)
+            self.conn.send_ready()
 
     def handle_node(self, msg):
         meta_data = QueueNode.get_metadata(self.config.work_dir, msg["task"]["nid"])
@@ -104,8 +119,17 @@ class WorkerTask:
                 self.logger.warn("Provided alternative payload found invalid - bug in stage %s?", meta_data["state"]["name"])
         self.conn.send_node_done(meta_data["id"], results, new_payload)
 
+    def handle_sym_request(self, msg):
+        request = SyxRequest.unpack(msg["request"])
+        self.q.set_payload(request.get_payload())
+        self.q.qemu_aux_buffer.set_syx_mode(True)
+        self.q.qemu_aux_buffer.set_syx_params(request)
+        self.q.syx_sym_result_s.new_run(request.get_payload(), request.fuzzer_input_offset - struct.calcsize(qemu.payload_format), request.length)
+        self.q.send_payload()
+        logger.info("End of the symbolic request. Sending back results to the manager...")
+        self.conn.send_sym_result(self.q.syx_sym_result_s.get_new_inputs())
+    
     def start(self):
-
         def sigterm_handler(signal, frame):
             if self.q:
                 self.q.async_exit()
@@ -140,8 +164,12 @@ class WorkerTask:
 
     def loop(self):
         self.logger.info("Entering fuzz loop..")
-        self.conn.send_ready()
-
+        
+        if self.syx_mode:
+            self.conn.send_sym_wait()
+        else:
+            self.conn.send_ready()
+            
         while True:
             try:
                 msg = self.conn.recv()
@@ -149,14 +177,24 @@ class WorkerTask:
                 self.logger.error("Lost connection to Manager. Shutting down.")
                 return
 
-            if msg["type"] == MSG_RUN_NODE:
-                self.handle_node(msg)
-            elif msg["type"] == MSG_IMPORT:
-                self.handle_import(msg)
-            elif msg["type"] == MSG_BUSY:
-                self.handle_busy()
+            if self.syx_mode:
+                if msg["type"] == MSG_SYM_REQUEST:
+                    self.handle_sym_request(msg)
+                elif msg["type"] == MSG_BUSY:
+                    self.handle_busy()
+                else:
+                    raise ValueError("{}: Unknown message type {}".format(self, msg))
             else:
-                raise ValueError("Unknown message type {}".format(msg))
+                if msg["type"] == MSG_RUN_NODE:
+                    self.handle_node(msg)
+                elif msg["type"] == MSG_IMPORT:
+                    self.handle_import(msg)
+                elif msg["type"] == MSG_IMPORT_SYX:
+                    self.handle_import(msg, True)
+                elif msg["type"] == MSG_BUSY:
+                    self.handle_busy()
+                else:
+                    raise ValueError("{}: Unknown message type {}".format(self, msg))
 
     def quick_validate(self, data, old_res, trace=False):
         # Validate in persistent mode. Faster but problematic for very funky targets
@@ -249,6 +287,10 @@ class WorkerTask:
         info["starved"]     = exec_res.starved
         if self.conn is not None:
             self.conn.send_new_input(data, exec_res.copy_to_array(), info)
+            
+    def __send_sym_new_to_manager(self, sym_requests):
+        if self.conn is not None:
+            self.conn.send_sym_new(sym_requests)
 
     def trace_payload(self, data, info):
         # Legacy implementation of -trace (now -trace_cb) using libxdc_edge_callback hook.
@@ -344,6 +386,9 @@ class WorkerTask:
 
         exec_res = self.__execute(data)
         self.statistics.event_exec(bb_cov=self.q.bb_seen)
+        
+        if len(exec_res.syx_sym_requests) > 0:
+            self.__send_sym_new_to_manager(exec_res.syx_sym_requests)
 
         is_new_input = self.bitmap_storage.should_send_to_manager(exec_res, exec_res.exit_reason)
         crash = exec_res.is_crash()

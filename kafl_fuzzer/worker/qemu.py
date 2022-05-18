@@ -18,8 +18,12 @@ import time
 import shutil
 import logging
 
+
 from kafl_fuzzer.common.util import strdump, print_hprintf
 from kafl_fuzzer.technique.redqueen.workdir import RedqueenWorkdir
+from kafl_fuzzer.technique.syx.request import SyxRequest
+from kafl_fuzzer.technique.syx.results import Results
+from kafl_fuzzer.technique.syx.workdir import SyxWorkdir
 from kafl_fuzzer.worker.execution_result import ExecutionResult
 from kafl_fuzzer.worker.qemu_aux_buffer import QemuAuxBuffer
 from kafl_fuzzer.worker.qemu_aux_buffer import QemuAuxRC as RC
@@ -28,18 +32,17 @@ from kafl_fuzzer.common.logger import WorkerLogAdapter
 class QemuIOException(Exception):
         """Exception raised when Qemu interaction fails"""
         pass
-
 class qemu:
-    payload_header_size = 4 # must correspond to set_payload() and nyx_api.h
+    payload_header_size = 8 # must correspond to set_payload() and nyx_api.h
+    payload_format = "=II"
 
-
-    def __init__(self, pid, config, debug_mode=False, notifiers=True, resume=False):
-
+    def __init__(self, pid, config, debug_mode=False, resume=False, syx_mode=False):
         self.debug_mode = debug_mode
+        self.syx_mode = syx_mode
         self.ijonmap_size = 0x1000 # quick fix - bitmaps are not processed!
         self.bitmap_size = config.bitmap_size
         self.payload_size = config.payload_size
-        self.payload_limit = config.payload_size - qemu.payload_header_size
+        self.payload_limit = config.payload_size - self.payload_header_size
         self.config = config
         self.pid = pid
         self.alt_bitmap = bytearray(self.bitmap_size)
@@ -48,25 +51,33 @@ class qemu:
         self.logger_no_prefix = logging.getLogger(__name__)
         self.logger = WorkerLogAdapter(self.logger_no_prefix, {'pid': self.pid})
 
+        self.agent_flags = 0
+
         self.process = None
         self.control = None
         self.persistent_runs = 0
 
-        work_dir = self.config.work_dir
+        self.work_dir = self.config.work_dir
 
-        self.qemu_aux_buffer_filename = work_dir + "/aux_buffer_%d" % self.pid
-
-        self.bitmap_filename = work_dir + "/bitmap_%d" % self.pid
-        self.ijonmap_filename = work_dir + "/ijon_%d" % self.pid
-        self.payload_filename = work_dir + "/payload_%d" % self.pid
-        self.control_filename = work_dir + "/interface_%d" % self.pid
-        self.qemu_trace_log = work_dir + "/qemu_trace_%02d.log" % self.pid
-        self.serial_logfile = work_dir + "/serial_%02d.log" % self.pid
+        self.qemu_aux_buffer_filename = self.work_dir + "/aux_buffer_%d" % self.pid
+    
+        self.bitmap_filename = self.work_dir + "/bitmap_%d" % self.pid
+        self.ijonmap_filename = self.work_dir + "/ijon_%d" % self.pid
+        self.payload_filename = self.work_dir + "/payload_%d" % self.pid
+        self.control_filename = self.work_dir + "/interface_%d" % self.pid
+        self.qemu_trace_log = self.work_dir + "/qemu_trace_%02d.log" % self.pid
+        self.serial_logfile = self.work_dir + "/serial_%02d.log" % self.pid
         self.hprintf_log = self.config.log_hprintf or self.config.log_crashes
-        self.hprintf_logfile = work_dir + "/hprintf_%02d.log" % self.pid
+        self.hprintf_logfile = self.work_dir + "/hprintf_%02d.log" % self.pid
 
-        self.redqueen_workdir = RedqueenWorkdir(self.pid, config)
-        self.redqueen_workdir.init_dir()
+        if not self.syx_mode:
+            self.redqueen_workdir = RedqueenWorkdir(self.pid, config)
+            self.redqueen_workdir.init_dir()
+
+        if self.syx_mode:
+            self.syx_workdir = SyxWorkdir(self.pid, config)
+            self.syx_workdir.init_dir()
+            self.syx_sym_result_s = Results(self.syx_workdir.result())
 
         if not resume:
             for page_cache_ext in ["lock", "dump", "addr"]:
@@ -76,79 +87,121 @@ class qemu:
         self.starved = False
         self.exiting = False
 
+
+        self.ijon_shm_f     = os.open(self.ijonmap_filename, os.O_RDWR | os.O_SYNC | os.O_CREAT)
+        self.kafl_shm_f     = os.open(self.bitmap_filename, os.O_RDWR | os.O_SYNC | os.O_CREAT)
+        self.fs_shm_f       = os.open(self.payload_filename, os.O_RDWR | os.O_SYNC | os.O_CREAT)
+        
+        self.syx_sym_requests = []
+
+        os.ftruncate(self.ijon_shm_f, self.ijonmap_size)
+        os.ftruncate(self.kafl_shm_f, self.bitmap_size)
+        os.ftruncate(self.fs_shm_f, self.payload_size)
+
+        self.kafl_shm = mmap.mmap(self.kafl_shm_f, 0)
+        self.c_bitmap = (ctypes.c_uint8 * self.bitmap_size).from_buffer(self.kafl_shm)
+        self.fs_shm = mmap.mmap(self.fs_shm_f, 0)
+
+        self.resume = resume
+
+        self.cmd = self.get_qemu_cmd()
+    
+    def get_qemu_cmd(self) -> str:
+        assert(self.payload_size % 4096 == 0)
+        
         # TODO: list append should work better than string concatenation, especially for str.replace() and later popen()
-        self.cmd = self.config.qemu_base
-        self.cmd += " -chardev socket,server,id=nyx_socket,path=" + self.control_filename + \
+        if self.syx_mode:
+            cmd = self.config.qemu_base_syx
+        else:
+            cmd = self.config.qemu_base
+
+        cmd += " -chardev socket,server,nowait,id=nyx_socket,path=" + self.control_filename + \
                     " -device nyx,chardev=nyx_socket" + \
-                    ",workdir=" + work_dir + \
+                    ",workdir=" + self.work_dir + \
                     ",worker_id=%d" % self.pid + \
                     ",bitmap_size=" + str(self.bitmap_size) + \
                     ",input_buffer_size=" + str(self.payload_size)
+        
+        if self.syx_mode:
+            cmd += ",syx_sym_tcg=true"
 
         if self.config.trace:
-            self.cmd += ",dump_pt_trace"
+            cmd += ",dump_pt_trace"
 
         if self.config.trace_cb:
-            self.cmd += ",edge_cb_trace"
+            cmd += ",edge_cb_trace"
 
         if self.config.sharedir:
-            self.cmd += ",sharedir=" + self.config.sharedir
+            cmd += ",sharedir=" + self.config.sharedir
 
         for i in range(4):
             key = "ip" + str(i)
-            if getattr(config, key, None):
-                range_a = hex(getattr(config, key)[0]).replace("L", "")
-                range_b = hex(getattr(config, key)[1]).replace("L", "")
-                self.cmd += ",ip" + str(i) + "_a=" + range_a + ",ip" + str(i) + "_b=" + range_b
+            if getattr(self.config, key, None):
+                range_a = hex(getattr(self.config, key)[0]).replace("L", "")
+                range_b = hex(getattr(self.config, key)[1]).replace("L", "")
+                cmd += ",ip" + str(i) + "_a=" + range_a + ",ip" + str(i) + "_b=" + range_b
 
-        self.cmd = [_f for _f in self.cmd.split(" ") if _f]
+        cmd = [_f for _f in cmd.split(" ") if _f]
 
-        if self.config.qemu_serial:
-            # config.qemu_serial should just contain the device(s) to emulate, with id=kafl_serial
-            self.cmd.extend(self.config.qemu_serial.split(" "))
-            self.cmd.extend(["-chardev", "file,id=kafl_serial,mux=on,path=" + self.serial_logfile])
+        if self.syx_mode:
+            if self.config.qemu_serial_syx:
+                # config.qemu_serial_syx should just contain the device(s) to emulate, with id=kafl_serial
+                cmd.extend(self.config.qemu_serial_syx.split(" "))
+                cmd.extend(["-chardev", "file,id=kafl_serial,mux=on,path=" + self.serial_logfile])
+        else:
+            if self.config.qemu_serial:
+                # config.qemu_serial should just contain the device(s) to emulate, with id=kafl_serial
+                cmd.extend(self.config.qemu_serial.split(" "))
+                cmd.extend(["-chardev", "file,id=kafl_serial,mux=on,path=" + self.serial_logfile])
 
-        self.cmd.extend(["-m", str(config.qemu_memory)])
+        cmd.extend(["-m", str(self.config.qemu_memory)])
 
         if self.debug_mode and self.config.log:
-            #self.cmd.extend("-trace", "events=/tmp/events"])
-            #self.cmd.extend("-d", "kafl", "-D", "self.qemu_trace_log"])
+            #cmd.extend("-trace", "events=/tmp/events"])
+            #cmd.extend("-d", "kafl", "-D", "self.qemu_trace_log"])
             pass
 
         if self.config.gdbserver:
-            self.cmd.extend(["-s", "-S"])
+            cmd.extend(["-s", "-S"])
 
         # Lauch either as VM snapshot, direct kernel/initrd boot, or -bios boot
         if self.config.qemu_image:
-            self.cmd.extend(["-drive", "file=" + self.config.qemu_image])
+            cmd.extend(["-drive", "file=" + self.config.qemu_image])
         if self.config.qemu_kernel:
-            self.cmd.extend(["-kernel", self.config.qemu_kernel])
+            cmd.extend(["-kernel", self.config.qemu_kernel])
             if self.config.qemu_initrd:
-                self.cmd.extend(["-initrd", self.config.qemu_initrd])
+                cmd.extend(["-initrd", self.config.qemu_initrd])
         if self.config.qemu_bios:
-            self.cmd.extend(["-bios", self.config.qemu_bios])
+            cmd.extend(["-bios", self.config.qemu_bios])
 
         # Qemu -append option
         if self.config.qemu_append:
-            self.cmd.extend(["-append", self.config.qemu_append])
+            cmd.extend(["-append", self.config.qemu_append])
 
         # Qemu extra options
-        if self.config.qemu_extra:
-            self.cmd.extend(self.config.qemu_extra.split(" "))
+        if self.syx_mode:
+            if self.config.qemu_extra_syx:
+                cmd.extend(self.config.qemu_extra_syx.split(" "))
+        else:
+            if self.config.qemu_extra:
+                cmd.extend(self.config.qemu_extra.split(" "))
 
         # Fast VM snapshot configuration
-        self.cmd.append("-fast_vm_reload")
-        snapshot_path = work_dir + "/snapshot/"
+        if not self.syx_mode:
+            cmd.append("-fast_vm_reload")
+            snapshot_path = self.work_dir + "/snapshot/",
 
-        if pid == 0 or pid == 1337 and not resume:
-            # boot and create snapshot
-            if self.config.qemu_snapshot:
-                self.cmd.append("path=%s,load=off,pre_path=%s" % (snapshot_path, self.config.qemu_snapshot))
+            if self.pid == 0 or self.pid == 1337 and not self.resume:
+                # boot and create snapshot
+                if self.config.qemu_snapshot:
+                    cmd.append("path=%s,load=off,pre_path=%s" % (snapshot_path, self.config.qemu_snapshot))
+                else:
+                    cmd.append("path=%s,load=off" % snapshot_path)
             else:
-                self.cmd.append("path=%s,load=off" % snapshot_path)
-        else:
-            # boot and wait for snapshot creation (or load from existing file)
-            self.cmd.append("path=%s,load=on" % (snapshot_path))
+                # boot and wait for snapshot creation (or load from existing file)
+                cmd.append("path=%s,load=on" % (snapshot_path))
+
+        return cmd
 
     # Asynchronous exit by Worker. Note this may be called multiple times
     # while we were in the middle of shutdown(), start(), send_payload(), ..
@@ -158,8 +211,7 @@ class qemu:
 
         self.exiting = True
         self.shutdown()
-
-
+    
     def shutdown(self):
         self.logger.info("Shutting down Qemu after %d execs..", self.persistent_runs)
 
@@ -188,7 +240,7 @@ class qemu:
             header = "\n=================<%s Console Output>==================\n" %self
             footer = "====================</Console Output>======================\n"
             self.logger.info(header + output + footer)
-
+        
         try:
             self.kafl_shm.close()
         except (BufferError, AttributeError):
@@ -361,7 +413,7 @@ class qemu:
             with open(self.hprintf_logfile, "a") as f:
                 f.write(msg)
         elif not self.config.quiet:
-            print_hprintf(msg)
+            print_hprintf(str(self) + ": " + msg)
 
     def handle_habort(self):
         msg = self.qemu_aux_buffer.get_misc_buf()
@@ -375,6 +427,13 @@ class qemu:
 
         self.run_qemu()
         raise QemuIOException(msg)
+    
+    def handle_syx_sym_new(self, syx_fuzzer_input_offset, syx_len):
+        logger.debug(self.__str__() + ": New Symbolic request")
+        logger.debug(self.__str__() + f": offset: {syx_fuzzer_input_offset}")
+        logger.debug(self.__str__() + f": len: {syx_len}")
+        logger.debug(self.__str__() + f": payload: {self.current_payload[:20]}")
+        self.syx_sym_requests.append(SyxRequest(syx_fuzzer_input_offset, syx_len, self.current_payload))
 
     # Fully stop/start Qemu instance to store logs + possibly recover
     def restart(self):
@@ -391,6 +450,8 @@ class qemu:
     def debug_payload(self):
 
         self.set_timeout(0)
+        if self.syx_mode:
+            self.set_syx_run()
         #self.send_payload()
         while True:
             self.run_qemu()
@@ -404,6 +465,14 @@ class qemu:
                 continue
             if result.exec_code == RC.ABORT:
                 self.handle_habort()
+            if result.exec_code == RC.SYX_SYM_FLUSH:
+                print("[PYTHON] Success flush! Collecting + printing results for the current run...")
+                self.syx_sym_result_s.collect()
+                self.syx_sym_result_s.print_results()
+                continue
+            if result.exec_code == RC.SUCCESS:
+                print("[PYTHON] Success symbolic run! Stopping QEMU SE...")
+                break
             if result.exec_done:
                 break
 
@@ -411,8 +480,13 @@ class qemu:
         #self.audit(result)
         return result
 
-    def send_payload(self):
 
+    def set_syx_run(self):
+        logger.info("Enabling SYX in the python side.")
+        self.qemu_aux_buffer.set_syx_mode(True)
+        self.qemu_aux_buffer.set_syx_params(self.syx_phys_addr, self.syx_virt_addr, self.syx_len)
+
+    def send_payload(self) -> ExecutionResult:
         if self.exiting:
             sys.exit(0)
 
@@ -447,6 +521,19 @@ class qemu:
 
             if result.exec_code == RC.ABORT:
                 self.handle_habort()
+            
+            if self.syx_mode:
+                if result.exec_code == RC.SYX_SYM_WAIT:
+                    break
+                
+                if result.exec_code == RC.SYX_SYM_FLUSH:
+                    self.syx_sym_result_s.collect()
+                    continue
+            else:
+                if result.exec_code == RC.SYX_SYM_NEW:
+                    self.handle_syx_sym_new(result.syx_fuzzer_input_offset,
+                                            result.syx_len)
+                    continue
 
             if result.exec_done:
                 break
@@ -459,16 +546,21 @@ class qemu:
                 old_address = result.page_fault_addr
                 self.qemu_aux_buffer.dump_page(result.page_fault_addr)
 
-        # record highest seen BBs
-        self.bb_seen = max(self.bb_seen, result.bb_cov)
-
         #runtime = result.runtime_sec + result.runtime_usec/1000/1000
-        res = ExecutionResult(
-                self.c_bitmap, self.bitmap_size,
-                self.exit_reason(result), time.time() - start_time)
+        if self.syx_mode:
+            res = None
+        else:
+            # record highest seen BBs
+            if not self.syx_mode:
+                self.bb_seen = max(self.bb_seen, result.bb_cov)
 
-        if result.exec_code == RC.STARVED:
-            res.starved = True
+            res = ExecutionResult(
+                    self.c_bitmap, self.bitmap_size,
+                    qemu.exit_reason(result), time.time() - start_time,
+                    self.syx_sym_requests)
+            
+            if result.exec_code == RC.STARVED:
+                res.starved = True
 
         #self.audit(res.copy_to_array())
         #self.audit(bytearray(self.c_bitmap))
@@ -493,8 +585,7 @@ class qemu:
             self.alt_edges += new_bytes;
             self.logger.info("New bytes: %03d, bits: %03d, total edges seen: %03d", new_bytes, new_bits, self.alt_edges)
 
-
-    def exit_reason(self, result):
+    def exit_reason(result):
         if result.exec_code == RC.CRASH:
             return "crash"
         if result.exec_code == RC.TIMEOUT:
@@ -505,9 +596,15 @@ class qemu:
             return "regular"
         elif result.exec_code == RC.STARVED:
             return "regular"
+        elif result.exec_code == RC.SYX_SYM_NEW:
+            return "SYX new request"
+        elif result.exec_code == RC.SYX_SYM_WAIT:
+            return "SYX Waiting request"
+        elif result.exec_code == RC.SYX_SYM_FLUSH:
+            return "SYX Flushing new concrete inputs"
         else:
             raise QemuIOException("Unknown QemuAuxRC code")
-
+    
     def set_timeout(self, timeout):
         assert(self.qemu_aux_buffer)
         self.qemu_aux_buffer.set_timeout(timeout)
@@ -522,16 +619,23 @@ class qemu:
     def get_payload_limit(self):
         return self.payload_limit
 
-    def set_payload(self, payload):
+    def set_agent_flags(self, value):
+        self.agent_flags = value
+
+    def set_payload(self, payload) -> None:
         # Ensure the payload fits into SHM. Caller has to cut off since they also report findings.
         # actual payload is limited to payload_size - sizeof(uint32) - sizeof(uint8)
         assert(len(payload) <= self.payload_limit), "Payload size %d > SHM limit %d. Check size/shm config" % (len(payload),self.payload_limit)
 
         #if len(payload) > self.payload_limit:
         #    payload = payload[:self.payload_limit]
+        self.current_payload = payload[:]
         try:
-            struct.pack_into("=I", self.fs_shm, 0, len(payload))
-            self.fs_shm.seek(4)
+            struct.pack_into(qemu.payload_format, self.fs_shm, 0, self.agent_flags, len(payload))
+            if self.syx_mode:
+                self.logger.info(self.__str__() + " (set_payload): " + f" len: {len(payload)}")
+                self.logger.info(self.__str__() + " (set_payload): " + f" payload: {payload[20]}")
+            self.fs_shm.seek(8)
             self.fs_shm.write(payload)
             #self.fs_shm.flush()
         except ValueError:

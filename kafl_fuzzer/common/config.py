@@ -122,6 +122,8 @@ def add_args_fuzzer(parser):
                         action='store_true', default=False)
     parser.add_argument('--redqueen-simple', required=False, help=hidden('do not ignore simple matches in Redqueen'),
                         action='store_true', default=False)
+    parser.add_argument('--syx', metavar="<n>", help='enable SYX with <n> dedicated qemu instances. Set to 0 to disable SYX.',
+                        type=int, default=0, required=False)
     parser.add_argument('--cpu-offset', metavar='<n>', help="start CPU pinning at offset <n>",
                         type=int, default=0, required=False)
     parser.add_argument('--abort-time', metavar='<n>', help="exit after <n> hours",
@@ -142,6 +144,7 @@ def add_args_fuzzer(parser):
 def add_args_qemu(parser):
 
     config_default_base   = '-enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor-v1,+vmx -no-reboot -net none -display none'
+    config_default_base_syx   = '-machine kAFL64-v1 -cpu NYX64-TCG -no-reboot -net none -display none'
 
     # BIOS/Image/Kernel load modes are partly exclusive, but we need at least one of them
     parser.add_argument('--image', dest='qemu_image', metavar='<qcow2>', required=False, action=ExpandVars, 
@@ -161,9 +164,15 @@ def add_args_qemu(parser):
 
     parser.add_argument('--qemu-base', metavar='<str>', action=ExpandVars, help='base Qemu config (check defaults!)',
                         type=str, required=False, default=config_default_base)
+    parser.add_argument('--qemu-base-syx', metavar='<str>', action=ExpandVars, help='base Qemu config for SYX (check defaults!)',
+                        type=str, required=False, default=config_default_base_syx)
     parser.add_argument('--qemu-serial', metavar='<str>', help='Qemu serial emulation (redirected to file, see defaults)',
                         type=str, required=False, default=None)
+    parser.add_argument('--qemu-serial-syx', metavar='<str>', help='Qemu serial emulation for SYX (redirected to file, see defaults)',
+                        type=str, required=False, default=None)
     parser.add_argument('--qemu-extra', metavar='<str>', action=ExpandVars, help='extra Qemu config (check defaults!)',
+                        type=str, required=False, default=None)
+    parser.add_argument('--qemu-extra-syx', metavar='<str>', action=ExpandVars, help='extra Qemu config for SYX (check defaults!)',
                         type=str, required=False, default=None)
     parser.add_argument('--qemu-path', metavar='<file>', action=ExpandVars, help=hidden('path to Qemu-Nyx executable'),
                         type=parse_is_file, required=True, default=None)
@@ -202,11 +211,12 @@ def add_args_qemu(parser):
 # kafl_debug launch options
 def add_args_debug(parser):
 
-    debug_modes = ["benchmark", "gdb", "trace", "single", "trace-qemu", "noise", "printk", "redqueen",
+    debug_modes = ["benchmark", "gdb", "gdb-syx", "trace", "single", "trace-qemu", "noise", "printk", "redqueen",
                    "redqueen-qemu", "verify"]
     
     debug_modes_help = '<benchmark>\tperform performance benchmark\n' \
                        '<gdb>\t\trun payload with Qemu gdbserver (must compile without redqueen!)\n' \
+                       '<gdb-syx>\t\trun payload with Qemu SYX gdbserver\n' \
                        '<trace>\t\tperform trace run\n' \
                        '<trace-qemu>\tperform trace run and print QEMU stdout\n' \
                        '<noise>\t\tperform run and messure nondeterminism\n' \

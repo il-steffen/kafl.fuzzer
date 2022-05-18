@@ -13,6 +13,7 @@ CLRSCR =     '\x1b[1;1H'
 REALCLRSCR = '\x1b[2J'
 BOLD =       '\033[1m'
 FLUSH_LINE = '\r\x1b[K'
+SYMBOLIC_FEED = '\033[1;32m'
 
 
 def MOVE_CURSOR_UP(num):

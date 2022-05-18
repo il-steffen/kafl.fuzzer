@@ -6,11 +6,14 @@
 import mmap
 import os
 import struct
+import time
 
 from collections import namedtuple
 from enum import IntEnum
 
-from kafl_fuzzer.common import logger
+from kafl_fuzzer.common.logger import logger
+from kafl_fuzzer.common.util import strdump
+from kafl_fuzzer.technique.syx.request import SyxRequest
 
 
 result_tuple = namedtuple('result_tuple', [
@@ -30,11 +33,15 @@ result_tuple = namedtuple('result_tuple', [
     'bb_cov',
     'runtime_usec',
     'runtime_sec',
+    'pad4',
+    
+    'syx_fuzzer_input_offset',
+    'syx_len',
     ])
 
 my_magic = 0x54502d554d4551
-my_version = 0x3
-my_hash = 0x54
+my_version = 0x4
+my_hash = 0x69
 
 HEADER_SIZE = 128
 CAP_SIZE = 256
@@ -57,11 +64,26 @@ class QemuAuxRC(IntEnum):
     ABORT = 5
     SANITIZER = 6
     STARVED = 7
+    SYX_SYM_NEW = 8
+    SYX_SYM_FLUSH = 9
+    SYX_SYM_WAIT = 10
+    
 
 class QemuAuxBuffer:
 
     def __init__(self, file):
-        self.aux_buffer_fd = os.open(file, os.O_RDWR | os.O_SYNC)
+        
+        retry = 0
+        while True:
+            try: 
+                self.aux_buffer_fd = os.open(file, os.O_RDWR | os.O_SYNC)
+                break
+            except OSError:
+                retry += 1
+                time.sleep(1)
+                if retry >= 10:
+                    raise
+            
         self.aux_buffer = mmap.mmap(self.aux_buffer_fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ) # fix this later
         self.current_timeout = None
 
@@ -93,7 +115,7 @@ class QemuAuxBuffer:
 
     def get_result(self):
         return result_tuple._make(
-                struct.unpack_from('B?B? ???? QIIIII',
+                struct.unpack_from('B?B? ???? QIIIIII II',
                                    self.aux_buffer,
                                    offset=STATUS_OFFSET))
 
@@ -121,6 +143,14 @@ class QemuAuxBuffer:
 
     def set_reload_mode(self, enable):
         self.aux_buffer[CONFIG_OFFSET+8] = int(enable)
+        self.set_config_buffer_changed()
+    
+    def set_syx_mode(self, enable):
+        self.aux_buffer[CONFIG_OFFSET+21] = int(enable)
+        self.set_config_buffer_changed()
+    
+    def set_syx_params(self, request: SyxRequest):
+        struct.pack_into("=II", self.aux_buffer, CONFIG_OFFSET+22, request.fuzzer_input_offset, request.length)
         self.set_config_buffer_changed()
 
     def dump_page(self, addr):

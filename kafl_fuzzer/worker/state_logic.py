@@ -83,9 +83,9 @@ class FuzzingStateLogic:
 
         return ret
 
-    def process_import(self, payload, metadata):
+    def process_import(self, payload, metadata, syx = False):
         self.init_stage_info(metadata)
-        self.handle_import(payload, metadata)
+        self.handle_import(payload, metadata, syx)
 
     def process_kickstart(self, kick_len):
         metadata = {"state": {"name": "kickstart"}, "id": 0}
@@ -153,14 +153,14 @@ class FuzzingStateLogic:
             info.update(extra_info)
         return info
 
-    def handle_import(self, payload, metadata):
+    def handle_import(self, payload, metadata, syx=False):
         # for funky targets, retry seed a couple times to avoid false negatives
         retries = 1
         if self.config.funky:
             retries = 8
 
         for _ in range(retries):
-            _, is_new = self.execute(payload, label="import")
+            _, is_new = self.execute(payload, label="syx" if syx else "import")
             if is_new: break
 
         # Inform user if seed yields no new coverage. This may happen if -ip0 is
@@ -191,6 +191,10 @@ class FuzzingStateLogic:
         havoc.mutate_seq_havoc_array(payload, self.execute, num_execs)
         timer_end = time.time()
         self.performance = (timer_end-timer_start) / num_execs
+
+        self.worker.q.set_agent_flags(1)
+        self.execute_naked(payload, timeout=10, label="dump callers")
+        self.worker.q.set_agent_flags(0)
 
         # Trimming only for stable + non-crashing inputs
         if metadata["info"]["exit_reason"] != "regular": #  or metadata["info"]["stable"]:
@@ -307,6 +311,13 @@ class FuzzingStateLogic:
         parent_info = self.get_parent_info(extra_info)
         return self.worker.validate_bytes(payload, metadata, parent_info)
 
+    def execute_naked(self, payload, timeout=None, label=None):
+        self.stage_info_execs += 1
+
+        if label and label != self.stage_info["method"]:
+            self.stage_update_label(label)
+
+        return self.worker.execute_naked(payload, timeout=timeout)
 
     def execute(self, payload, label=None, extra_info=None):
 

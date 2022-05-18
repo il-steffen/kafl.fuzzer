@@ -15,11 +15,17 @@ from multiprocessing.connection import Listener, Client
 
 MSG_READY = 0
 MSG_IMPORT = 1
+MSG_IMPORT_SYX = 11
 MSG_RUN_NODE = 2
 MSG_NODE_DONE = 3
 MSG_NODE_ABORT = 6
 MSG_NEW_INPUT = 4
 MSG_BUSY = 5
+MSG_SYM_WAIT = 7 # qemu-syx is ready and waiting for a request
+MSG_SYM_NEW = 8 # qemu-kvm wants to send a symbolic execution request
+MSG_SYM_REQUEST = 9 # send a symbolic execution request to qemu-syx
+MSG_SYM_RESULT = 10 # send a symbolic result
+MSG_PRINT = 12 # print a message from the manager side
 
 KAFL_NAMED_SOCKET = '/kafl_socket'
 
@@ -55,6 +61,9 @@ class ServerConnection:
 
     def send_import(self, client, task_data):
         client.send_bytes(msgpack.packb({"type": MSG_IMPORT, "task": task_data}))
+    
+    def send_import_syx(self, client, task_data):
+        client.send_bytes(msgpack.packb({"type": MSG_IMPORT_SYX, "task": task_data}))
 
     def send_node(self, client, task_data):
         client.send_bytes(msgpack.packb({"type": MSG_RUN_NODE, "task": task_data}))
@@ -62,12 +71,19 @@ class ServerConnection:
     def send_busy(self, client):
         client.send_bytes(msgpack.packb({"type": MSG_BUSY}))
 
+    def send_sym_request(self, client, sym_request):
+        client.send_bytes(msgpack.packb(
+            {"type": MSG_SYM_REQUEST, "request": sym_request}))
 
 class ClientConnection:
-    def __init__(self, pid, config):
+    def __init__(self, pid, config, is_symbolic):
         self.pid = pid
         self.address = config.work_dir + KAFL_NAMED_SOCKET
         self.sock = self.connect()
+        if is_symbolic:
+            self.send_sym_wait()
+        else:
+            self.send_ready()
 
     def connect(self):
         sock = Client(self.address, 'AF_UNIX')
@@ -91,3 +107,23 @@ class ClientConnection:
     def send_node_abort(self, node_id, results):
         self.sock.send_bytes(msgpack.packb(
             {"type": MSG_NODE_ABORT, "node_id": node_id, "results": results}))
+
+    def send_print(self, msg):
+        self.sock.send_bytes(msgpack.packb(
+            {"type": MSG_PRINT, "msg": msg}))
+
+    def send_sym_new(self, sym_requests):
+        self.sock.send_bytes(msgpack.packb(
+            {"type": MSG_SYM_NEW, "requests": list(map(lambda req: req.pack(), sym_requests))}
+        ))
+
+    def send_sym_wait(self):
+        self.sock.send_bytes(msgpack.packb(
+            {"type": MSG_SYM_WAIT}
+        ))
+
+    def send_sym_result(self, results):
+        self.sock.send_bytes(msgpack.packb(
+            {"type": MSG_SYM_RESULT, "results": results}
+        ))
+

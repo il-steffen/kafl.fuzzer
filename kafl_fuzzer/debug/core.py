@@ -101,16 +101,47 @@ def gdb_session(config, qemu_verbose=True, notifiers=True):
         logger.info("Shutting down..")
         q.async_exit()
 
-def execute_once(config, qemu_verbose=False, notifiers=True):
+def gdb_session_syx(config, qemu_verbose=True, notifiers=True):
+    #from pprint import pprint
+    payload_file = config.input
+    resume = config.resume
+
+    config.gdbserver = False
+    q = qemu(0, config, notifiers=notifiers, resume=resume)
+
+    logger.info("Starting Qemu + GDB with payload %s" % payload_file)
+    logger.info("Connect with gdb to release guest from reset (localhost:1234)")
+    try:
+        if q.start():
+            q.set_payload(read_binary_file(payload_file))
+            (syx_phys_addr, syx_virt_addr, syx_len, syx_fuzz_offset) = q.debug_syx_payload()
+            q_syx = qemu(1, config, syx_mode=True)
+            try:
+                if q_syx.start():
+                    q_syx.set_payload(read_binary_file(payload_file))
+                    q_syx.debug_payload()
+            finally:
+                logger.info("Shutting down SYX TCG qemu..")
+                q_syx.async_exit()
+            #pprint(result._asdict())
+    finally:
+        logger.info("Shutting down KVM qemu..")
+        logger.info("Thank you for playing.")
+        q.async_exit()
+
+def execute_once(config, qemu_verbose=False, notifiers=True, syx=False):
     payload_file = config.input
     resume = config.resume
     null_hash = ExecutionResult.get_null_hash(config.bitmap_size)
 
     logger.info("Execute payload %s.. " % payload_file)
 
-    q = qemu(1337, config, debug_mode=False, notifiers=notifiers, resume=resume)
+    if syx:
+        q = qemu(1337, config, debug_mode=False, syx_mode=True)
+    else:    
+        q = qemu(1337, config, debug_mode=False, notifiers=notifiers, resume=resume)
+    
     assert q.start(), "Failed to start Qemu?"
-
 
     store_traces = config.trace
     if store_traces:
@@ -472,6 +503,7 @@ def start(config):
         if   (mode == "noise"):         debug_non_det(config, max_execs)
         elif (mode == "benchmark"):     benchmark(config)
         elif (mode == "gdb"):           gdb_session(config, qemu_verbose=True)
+        elif (mode == "gdb-syx"):       gdb_session_syx(config, qemu_verbose=True)
         elif (mode == "single"):        execute_once(config, qemu_verbose=False)
         elif (mode == "trace"):         debug_execution(config, max_execs)
         elif (mode == "trace-qemu"):    debug_execution(config, max_execs, qemu_verbose=True)

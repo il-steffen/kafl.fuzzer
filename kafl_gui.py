@@ -213,7 +213,7 @@ class GuiDrawer:
         # colors!
         curses.start_color()
         curses.use_default_colors()
-        curses.curs_set(0)
+        # curses.curs_set(0)
         curses.init_pair(0, -1, -1)
         curses.init_pair(1, curses.COLOR_GREEN, -1)
         curses.init_pair(2, curses.COLOR_YELLOW, -1)

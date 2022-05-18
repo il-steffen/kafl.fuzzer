@@ -19,7 +19,7 @@ import msgpack
 import lz4.frame as lz4
 
 from kafl_fuzzer.common.util import read_binary_file
-from kafl_fuzzer.manager.communicator import ServerConnection
+from kafl_fuzzer.manager.communicator import MSG_PRINT, MSG_SYM_NEW, MSG_SYM_RESULT, MSG_SYM_WAIT, ServerConnection
 from kafl_fuzzer.manager.communicator import MSG_NODE_DONE, MSG_NEW_INPUT, MSG_READY, MSG_NODE_ABORT
 from kafl_fuzzer.manager.queue import InputQueue
 from kafl_fuzzer.manager.statistics import ManagerStatistics
@@ -27,6 +27,9 @@ from kafl_fuzzer.manager.bitmap import BitmapStorage
 from kafl_fuzzer.manager.node import QueueNode
 from kafl_fuzzer.technique.redqueen.cmp import redqueen_global_config
 from kafl_fuzzer.worker.execution_result import ExecutionResult
+from kafl_fuzzer.technique.syx.queue import SyxQueue
+from kafl_fuzzer.technique.syx.request import SyxRequest
+from kafl_fuzzer.common import color
 
 from kafl_fuzzer.technique.helper import helper_init
 
@@ -43,6 +46,8 @@ class ManagerTask:
 
         self.statistics = ManagerStatistics(config)
         self.queue = InputQueue(self.config, self.statistics)
+        self.sym_queue = SyxQueue()
+        self.sym_fresh_inputs = []
         self.bitmap_storage = BitmapStorage(config, "main", read_only=False)
 
         helper_init()
@@ -68,6 +73,13 @@ class ManagerTask:
             seed = read_binary_file(path)
             os.remove(path)
             return self.comm.send_import(conn, {"type": "import", "payload": seed})
+        
+        
+        if len(self.sym_fresh_inputs) > 0:
+            input = self.sym_fresh_inputs.pop()
+            self.print_time(color.SYMBOLIC_FEED, f"New SYX input sent to NYX worker ({len(self.sym_fresh_inputs)} left)")
+            return self.comm.send_import_syx(conn, {"type": "import", "payload": input})
+
         # Process items from queue..
         node = self.queue.get_next()
         if node:
@@ -82,6 +94,26 @@ class ManagerTask:
             main_bitmap = self.bitmap_storage.get_bitmap_for_node_type("regular").c_bitmap
             if mmh3.hash(main_bitmap) == self.empty_hash:
                 logger.warn("Coverage bitmap is empty?! Check -ip0 or try better seeds.")
+                
+    def send_next_sym_task(self, conn):
+        if self.sym_queue.is_empty():
+            return self.comm.send_busy(conn)
+        
+        self.print_time(color.SYMBOLIC_FEED, "Sending new symbolic request")
+        sym_request = self.sym_queue.get()
+        return self.comm.send_sym_request(conn, sym_request.pack())
+    
+    def add_symbolic_requests(self, sym_requests):
+        for req in sym_requests:
+            sym_req = SyxRequest.unpack(req)
+            if self.sym_queue.add(sym_req):
+                self.print_time(color.SYMBOLIC_FEED,
+                    f"Added new Symbolic Request (Offset: {sym_req.fuzzer_input_offset}, Length: {sym_req.length})")
+    
+    def handle_get_sym_result(self, conn, results):
+        # print("Symbolic Result received!")
+        self.sym_fresh_inputs += results
+        return self.send_next_sym_task(conn)
 
     def loop(self):
         while True:
@@ -107,6 +139,14 @@ class ManagerTask:
                     # Initial Worker hello, send first task...
                     # logger.debug("Worker is ready..")
                     self.send_next_task(conn)
+                elif msg["type"] == MSG_SYM_WAIT:
+                    self.send_next_sym_task(conn)
+                elif msg["type"] == MSG_SYM_NEW:
+                    self.add_symbolic_requests(msg["requests"])
+                elif msg["type"] == MSG_SYM_RESULT:
+                    self.handle_get_sym_result(conn, msg["results"])
+                elif msg["type"] == MSG_PRINT:
+                    self.handle
                 else:
                     raise ValueError("unknown message type {}".format(msg))
             self.statistics.maybe_write_stats()
@@ -125,6 +165,16 @@ class ManagerTask:
         if n_limit:
             if n_limit < self.statistics.data['total_execs']:
                 raise SystemExit("Exit on max execs.")
+
+    def print_time(self, prefix, msg):
+        import time
+        
+        t_total = time.time() - self.statistics.data["start_time"]
+        t_hours, t_tmp = divmod(t_total, 3600)
+        t_mins, t_secs = divmod(t_tmp, 60)
+        t_str=('{:02}:{:02}:{:02}'.format(int(t_hours), int(t_mins), int(t_secs)))
+        
+        print(color.FLUSH_LINE + prefix + "%s: %s" % (t_str, msg) + color.ENDC)
 
     def store_trace(self, node, tmp_trace):
         if tmp_trace and os.path.exists(tmp_trace):

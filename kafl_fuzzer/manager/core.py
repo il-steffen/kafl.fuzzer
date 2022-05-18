@@ -23,7 +23,7 @@ from kafl_fuzzer.common.self_check import post_self_check
 from kafl_fuzzer.common.util import prepare_working_dir, copy_seed_files, qemu_sweep, filter_available_cpus
 from kafl_fuzzer.common.logger import setup_logging
 from kafl_fuzzer.manager.manager import ManagerTask
-from kafl_fuzzer.worker.worker import worker_loader
+from kafl_fuzzer.worker.worker import WorkerTask, worker_loader
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ def start(config):
     work_dir   = config.work_dir
     seed_dir   = config.seed_dir
     num_worker = config.processes
+    num_syx_workers = config.syx
 
     if not post_self_check(config):
         logger.error("Startup checks failed. Exit.")
@@ -83,9 +84,14 @@ def start(config):
     manager = ManagerTask(config)
 
     workers = []
+    workers_syx = []
     for i in range(num_worker):
-        workers.append(multiprocessing.Process(name="Worker " + str(i), target=worker_loader, args=(i,config)))
+        workers.append(multiprocessing.Process(name="Worker " + str(i), target=worker_loader, args=(i,config, False)))
         workers[i].start()
+    
+    for i in range(num_syx_workers):
+        workers_syx.append(multiprocessing.Process(name="SYX Worker " + str(num_worker + i), target=worker_loader, args=(num_worker + i, config, True)))
+        workers_syx[i].start()
 
     try:
         manager.loop()
@@ -95,6 +101,7 @@ def start(config):
         logger.info("Manager exit: " + str(e))
     finally:
         graceful_exit(workers)
+        graceful_exit(workers_syx)
 
     time.sleep(1)
     qemu_sweep("Detected potential qemu zombies, try to kill -9:")

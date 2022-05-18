@@ -26,10 +26,12 @@ class ManagerStatistics:
         self.write_thres = 0.5
         self.quiet = config.quiet
         self.num_workers = config.processes
+        self.num_syx_workers = config.syx
         self.work_dir = config.work_dir
         self.data = {
                 "start_time": time.time(),
                 "total_execs": 0,
+                "total_sym_execs": 0,
                 "num_funky": 0,
                 "num_reload": 0,
                 "num_timeout": 0,
@@ -50,7 +52,8 @@ class ManagerStatistics:
                     "kasan": 0,
                     "timeout": 0,
                     },
-                "num_workers": self.num_workers
+                "num_workers": self.num_workers,
+                "num_syx_workers": self.num_syx_workers
                 }
 
         self.stats_file = self.work_dir + "/stats"
@@ -295,6 +298,41 @@ class WorkerStatistics:
     def get_total_execs(self):
         return self.data["total_execs"]
 
+    def maybe_write_stats(self):
+        cur_time = time.time()
+        if cur_time - self.write_last < self.write_thres:
+            return
+
+        self.data["run_time"] = cur_time - self.data["start_time"]
+        self.data["execs/sec"] = self.execs_new // (cur_time - self.write_last)
+        self.data["total_execs"] += self.execs_new
+        self.execs_new = 0
+
+        atomic_write(self.filename, msgpack.packb(self.data))
+        #print "execs/sec: %d" % ((self.data["executions"] + self.data["executions_redqueen"]) / self.data["duration"])
+        self.write_last = cur_time
+
+class SyxWorkerStatistics:
+    def __init__(self, pid, config):
+        self.filename = "%s/worker_stats_%d" % (config.work_dir, pid)
+        self.write_last = 0
+        self.write_thres = 0.5
+        self.execs_new = 0
+        self.data = {
+            "start_time": time.time(),
+            "start_time_request": time.time(),
+            "run_time": 0,
+            "total_execs": 0,
+            "execs/sec": 0,
+            "execs/request": 0,
+            "num_timeout": 0,
+            "num_requests": 0,
+            "executions_redqueen": 0,
+            "node_id": 0,
+        }
+        # write once so that we have a valid stats file
+        self.maybe_write_stats()
+    
     def maybe_write_stats(self):
         cur_time = time.time()
         if cur_time - self.write_last < self.write_thres:
