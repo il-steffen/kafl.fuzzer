@@ -217,13 +217,14 @@ def add_args_qemu(parser):
 def add_args_debug(parser):
 
     debug_modes = ["benchmark", "gdb", "trace", "single", "trace-qemu", "noise", "printk", "redqueen",
-                   "redqueen-qemu", "verify"]
+                   "redqueen-qemu", "verify", "triage"]
     
     debug_modes_help = '<benchmark>\tperform performance benchmark\n' \
                        '<gdb>\t\trun payload with Qemu gdbserver (must compile without redqueen!)\n' \
                        '<trace>\t\tperform trace run\n' \
                        '<trace-qemu>\tperform trace run and print QEMU stdout\n' \
                        '<noise>\t\tperform run and messure nondeterminism\n' \
+                       '<triage>\t\tre-execute payload while collecting logs/traces\n' \
                        '<printk>\t\tredirect printk calls to kAFL\n' \
                        '<redqueen>\trun redqueen debugger\n' \
                        '<redqueen-qemu>\trun redqueen debugger and print QEMU stdout\n' \

@@ -10,6 +10,8 @@ from sys import stdout
 from threading import Thread
 
 import mmh3
+import msgpack
+import lz4.frame as lz4
 
 import kafl_fuzzer.common.color as color
 from kafl_fuzzer.common.rand import rand
@@ -102,20 +104,117 @@ def gdb_session(config, qemu_verbose=True, notifiers=True):
         logger.info("Shutting down..")
         q.async_exit()
 
+
+def corpus_get_metadata(work_dir, payload_file):
+    input_id = os.path.basename(payload_file).replace("payload_", "")
+    meta_file = work_dir + "/metadata/node_{}".format(input_id)
+    return msgpack.unpackb(read_binary_file(meta_file), strict_map_key=False)
+
+def execute_custom(qemu, payload, flags=0, log=True, trace=False):
+    payload_limit = qemu.get_payload_limit()
+
+    if len(payload) > payload_limit:
+        payload = payload[:payload_limit]
+
+    log_default = qemu.hprintf_log
+    qemu.hprintf_log = log
+    qemu.set_agent_flags(flags)
+    qemu.set_trace_mode(trace)
+
+    if os.path.exists(qemu.hprintf_logfile):
+        os.truncate(qemu.hprintf_logfile, 0)
+
+    qemu.set_payload(payload)
+    result = qemu.send_payload()
+
+    # restore settings for next run
+    qemu.hprintf_log = log_default
+    qemu.set_agent_flags(0)
+    qemu.set_trace_mode(False)
+
+    return result
+
+def triage_path(work_dir, metadata, result, filename):
+    # return unique folder for triage logs based on filename + execution result
+    res_hash = result.hash()
+    res_exit = result.exit_reason
+    if res_hash == metadata['info']['hash']:
+        res_exit = "*"
+    elif res_exit == metadata['info']['exit_reason']:
+        res_exit += "+"
+
+    path = work_dir + "/triage/repro_%05d_%s_%s/" % (metadata['id'], res_hash[:6], res_exit)
+    os.makedirs(path, exist_ok=True)
+
+    return path + filename
+
+def triage_payload(config):
+    qemu_id = 1337
+    payload_file = config.input
+
+    logger.info("Investigating payload %s.. " % payload_file)
+
+    metadata = corpus_get_metadata(config.work_dir, payload_file)
+    payload = read_binary_file(payload_file)
+    trace_dump = config.work_dir + "/pt_trace_dump_%d" % qemu_id
+
+    config.trace = True
+    config.trace_cb = False
+    for _ in range(config.iterations):
+
+        try:
+            q = qemu(qemu_id, config, resume=config.resume)
+            assert q.start(), "Failed to start Qemu?"
+
+            # re-execute iteratively with basic + verbose logging
+            result = execute_custom(q, payload)
+            shutil.move(
+                    q.hprintf_logfile,
+                    triage_path(config.work_dir, metadata, result, "hprintf.log"))
+
+            result = execute_custom(q, payload, flags=2)
+            shutil.move(
+                    q.hprintf_logfile,
+                    triage_path(config.work_dir, metadata, result, "stats.log"))
+
+            result = execute_custom(q, payload, flags=4)
+            shutil.move(
+                    q.hprintf_logfile,
+                    triage_path(config.work_dir, metadata, result, "stacks.log"))
+
+            # re-execute with tracing (may additionally disrupt execution timing)
+            result = execute_custom(q, payload, trace=True)
+            if os.path.exists(trace_dump):
+                shutil.move(trace_dump, triage_path(config.work_dir, metadata, result, "trace.bin"))
+            else:
+                logger.warn("Failed to dump PT file?!")
+            shutil.move(
+                    q.hprintf_logfile,
+                    triage_path(config.work_dir, metadata, result, "trace_hprintf.log"))
+
+        except Exception as e:
+            if q:
+                q.async_exit()
+            raise e
+        finally:
+            q.shutdown()
+
+
 def execute_once(config, qemu_verbose=False, notifiers=True):
+    qemu_id = 1337
     payload_file = config.input
     resume = config.resume
     null_hash = ExecutionResult.get_null_hash(config.bitmap_size)
 
     logger.info("Execute payload %s.. " % payload_file)
 
-    q = qemu(1337, config, debug_mode=False, notifiers=notifiers, resume=resume)
+    q = qemu(qemu_id, config, debug_mode=False, notifiers=notifiers, resume=resume)
     assert q.start(), "Failed to start Qemu?"
 
 
     store_traces = config.trace
     if store_traces:
-        trace_out = config.work_dir + "/redqueen_workdir_1337/pt_trace_results.txt"
+        trace_out = config.work_dir + "/pt_trace_dump_%d" % qemu_id
         trace_dir  = config.work_dir + "/traces/"
 
     payload = read_binary_file(payload_file)
@@ -470,6 +569,7 @@ def start(config):
         elif (mode == "benchmark"):     benchmark(config)
         elif (mode == "gdb"):           gdb_session(config, qemu_verbose=True)
         elif (mode == "single"):        execute_once(config, qemu_verbose=False)
+        elif (mode == "triage"):        triage_payload(config)
         elif (mode == "trace"):         debug_execution(config, max_execs)
         elif (mode == "trace-qemu"):    debug_execution(config, max_execs, qemu_verbose=True)
         elif (mode == "printk"):        debug_execution(config, 1, qemu_verbose=True, notifiers=False)
