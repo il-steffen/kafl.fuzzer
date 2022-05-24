@@ -68,6 +68,13 @@ class qemu:
         self.redqueen_workdir = RedqueenWorkdir(self.pid, config)
         self.redqueen_workdir.init_dir()
 
+        self.kafl_shm = None
+        self.c_bitmap = None
+        self.fs_shm = None
+        self.kafl_shm_f = None
+        self.c_bitmap_f = None
+        self.fs_shm_f = None
+
         if not resume:
             for page_cache_ext in ["lock", "dump", "addr"]:
                 with open(self.config.work_dir + "/page_cache." + page_cache_ext, 'w') as f:
