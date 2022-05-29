@@ -166,19 +166,29 @@ def triage_payload(config):
             q = qemu(qemu_id, config, resume=config.resume)
             assert q.start(), "Failed to start Qemu?"
 
+            # first execute after boot is often inconsistent
+            result = execute_custom(q, payload)
+            if os.path.exists(q.hprintf_logfile):
+                shutil.move(
+                    q.hprintf_logfile,
+                    triage_path(config.work_dir, metadata, result, "hprintf.log"))
+
             # re-execute iteratively with basic + verbose logging
             result = execute_custom(q, payload)
-            shutil.move(
+            if os.path.exists(q.hprintf_logfile):
+                shutil.move(
                     q.hprintf_logfile,
                     triage_path(config.work_dir, metadata, result, "hprintf.log"))
 
             result = execute_custom(q, payload, flags=2)
-            shutil.move(
+            if os.path.exists(q.hprintf_logfile):
+                shutil.move(
                     q.hprintf_logfile,
                     triage_path(config.work_dir, metadata, result, "stats.log"))
 
             result = execute_custom(q, payload, flags=4)
-            shutil.move(
+            if os.path.exists(q.hprintf_logfile):
+                shutil.move(
                     q.hprintf_logfile,
                     triage_path(config.work_dir, metadata, result, "stacks.log"))
 
@@ -188,9 +198,10 @@ def triage_payload(config):
                 shutil.move(trace_dump, triage_path(config.work_dir, metadata, result, "trace.bin"))
             else:
                 logger.warn("Failed to dump PT file?!")
-            shutil.move(
-                    q.hprintf_logfile,
-                    triage_path(config.work_dir, metadata, result, "trace_hprintf.log"))
+            if os.path.exists(q.hprintf_logfile):
+                shutil.move(
+                        q.hprintf_logfile,
+                        triage_path(config.work_dir, metadata, result, "trace_hprintf.log"))
 
         except Exception as e:
             if q:
