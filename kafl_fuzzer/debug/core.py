@@ -370,7 +370,7 @@ def debug_non_det(config, max_execs=0):
                     exec_res = q.send_payload()
 
                 if exec_res.is_crash():
-                    logger.info("\nExit reason `%s` - restarting..." % exec_res.exit_reason)
+                    logger.info("Exit reason `%s` - restarting..." % exec_res.exit_reason)
                     q.reload()
 
                 time.sleep(delay)
@@ -384,6 +384,7 @@ def debug_non_det(config, max_execs=0):
                 if hash_value != first_hash:
                     hash_mismatch += 1
                 execs += 1
+
             runtime = time.time() - start
             total += runtime
             iterations += execs
@@ -398,8 +399,9 @@ def debug_non_det(config, max_execs=0):
     except KeyboardInterrupt:
         pass
     finally:
-        print("\nOverall Perf: %7.2f execs/s, Execs: %7d, Mismatches: %s %4d %s, Noise %3d" %
-                (iterations / total, iterations, code, hash_mismatch, color.ENDC, noise))
+        if total:
+            print("\nOverall Perf: %7.2f execs/s, Execs: %7d, Mismatches: %s %4d %s, Noise %3d" %
+                    (iterations / total, iterations, code, hash_mismatch, color.ENDC, noise))
         q.shutdown()
 
     for h in hashes.keys():
