@@ -147,7 +147,7 @@ class qemu:
                 self.cmd.append("path=%s,load=off" % snapshot_path)
         else:
             # boot and wait for snapshot creation (or load from existing file)
-            self.cmd.append("path=%s,load=off" % (snapshot_path))
+            self.cmd.append("path=%s,load=on" % (snapshot_path))
 
     def __str__(self):
         return "Worker-%02d" % self.pid
