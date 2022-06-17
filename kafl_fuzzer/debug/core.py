@@ -143,7 +143,7 @@ def triage_path(work_dir, metadata, result, filename):
     elif res_exit == metadata['info']['exit_reason']:
         res_exit += "+"
 
-    path = work_dir + "/triage/repro_%05d_%s_%s/" % (metadata['id'], res_hash[:6], res_exit)
+    path = work_dir + "/triage/repro_%05d_%s_%s_%s/" % (metadata['id'], metadata['info']['hash'][:6], res_hash[:6], res_exit)
     os.makedirs(path, exist_ok=True)
 
     return path + filename
