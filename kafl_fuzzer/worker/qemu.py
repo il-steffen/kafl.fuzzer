@@ -256,10 +256,6 @@ class qemu:
                 else:
                     final_cmdline += ' ' + arg
 
-        # delayed Qemu startup - some nasty race condition when launching too many at once
-        if self.pid not in [0, 1337]:
-            time.sleep(4 + 0.1*self.pid)
-
         self.logger.info("Launching virtual machine...%s", final_cmdline)
 
 
