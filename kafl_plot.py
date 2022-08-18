@@ -95,15 +95,19 @@ class Graph:
         method = node["info"]["method"]
         stage = node["state"]["name"]
         t_seen = node.get("attention_secs",0)/60
+        t_buff = log(t_seen+1.5, 1.5)
 
         t_total = node["info"]["time"] - self.global_startup
         t_hours, t_tmp = divmod(t_total, 3600)
         t_mins, t_secs = divmod(t_tmp, 60)
-        t_str=('{:02}:{:02}:{:02}'.format(int(t_hours), int(t_mins), int(t_secs)))
+        t_str=('{:3}:{:02}:{:02}'.format(int(t_hours), int(t_mins), int(t_secs)))
 
-        # score as used by new scheduler/queue sorting
+        # perf and impact scores as used by new scheduler/queue sorting
         score = node.get("score",0)
         prio = node.get("fav_factor",0)
+        phase = 1
+        if len(favs) == 0:
+            phase /= 2
 
         if exit == "regular":
             if node["state"]["name"] == "final":
@@ -114,9 +118,9 @@ class Graph:
         elif exit == "kasan": color = "orange"
         elif exit == "timeout": color = "grey"
 
-        print("%s: Found %3d from %3d using %s [%s] (stage=%s, exit=%s, favs=%d, score=%.1f [%3.1fK, %.2fms], prio=%.1f, t=%.1fmin)" %
+        print("%s: Found %4d from %4d using %s [%s] (stage=%s, exit=%s, favs=%d, len=%.1fK, speed=%.2fms score=%.1f prio=%.1f, buff=%.1f, sched=%.2f, t_fuzzed: %.1fmin" %
                 (t_str, node_id, parent, method[:10].ljust(10), sample[:32].ljust(32),
-                    stage[:8].ljust(8), exit[:1].title(), len(favs), score, plen/1024, perf*1000, prio, t_seen))
+                    stage[:8].ljust(8), exit[:1].title(), len(favs), plen/1024, perf*1000, score, prio, t_buff, prio*phase/t_buff, t_seen))
 
         self.dot.add_node(node["id"], label="%s\n[id=%02d, score=%2.2f]\n%s" % (sample[:12], node_id, score, exit), color=color)
         self.dot.add_edge(parent, node["id"], headlabel=method, arrowhead='open')

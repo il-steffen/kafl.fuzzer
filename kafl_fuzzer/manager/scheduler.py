@@ -27,7 +27,7 @@ from math import log, log2, log10, ceil
 
 # scale arbitrarily large / small inputs down to interval [1,scale]
 # supply alternative log to get a better fit
-def log_scale(value, base=2):
+def log_scale(value, base=1.5):
 
     if base == 2:
         return log2(base+value)
@@ -59,6 +59,9 @@ class Scheduler:
         time_spent = node.node_struct.get("attention_secs",0) / 60
         time_buff = log_scale(time_spent)
 
+        if len(node.get_fav_bits()) < 1:
+            time_buff *= 2
+
         # assign special buff based on node type or stage
         if node.get_exit_reason() != "regular":
             phase = 1/10
@@ -77,9 +80,6 @@ class Scheduler:
             phase = 1
         else:
             assert(False), "unknown state"
-
-        if not node.is_favorite():
-            phase /= 5
 
         #logger.info(
         #        "%s: node %3d rated %5.2f [phase=%3d, prio=%.2f, tbuff=%.2f]" % (
