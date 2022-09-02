@@ -549,15 +549,22 @@ class GuiData:
             return 0
 
     def est_done(self):
+        # consider done if no findings for 24h and all nodes in final stage
+        # TODO: instead of last finding, use min exec count of least executed node
+        time_limit = 24*60
+        time_last = min(self.time_since("regular")/60, time_limit)
+        time_done = time_last/time_limit
+
         try:
-            favs_done = 100*self.fav_fin() / self.fav_total()
+            favs_done = self.fav_fin() / self.fav_total()
         except ZeroDivisionError:
-            favs_done = 100
+            favs_done = 1
         try:
-            norm_done = 100*self.normal_fin() / self.normal_total()
+            norm_done = self.normal_fin() / self.normal_total()
         except ZeroDivisionError:
-            norm_done = 100
-        return 0.75*favs_done + 0.25*norm_done
+            norm_done = 1
+
+        return 40*favs_done + 20*norm_done + 40*time_done
 
     def total_reloads(self):
         return self.stats.get("num_reload", 0)
