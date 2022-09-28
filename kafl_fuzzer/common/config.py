@@ -77,6 +77,8 @@ def add_args_general(parser):
                         required=True, help='path to the output/working directory.')
     parser.add_argument('--purge', required=False, help='purge the working directory at startup.',
                         action='store_true', default=False)
+    parser.add_argument('-k', '--kill', required=False, help='Kill any qemu process for the current user.',
+                        action='store_true', default=False)
     parser.add_argument('-r', '--resume', required=False, help='use VM snapshot from existing workdir (for cov/gdb)',
                         action='store_true', default=False)
     parser.add_argument('-p', '--processes', required=False, metavar='<n>', type=int, default=1,

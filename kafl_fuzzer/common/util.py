@@ -28,17 +28,23 @@ class Singleton(type):
 
 
 # print any qemu-like processes owned by this user
-def qemu_sweep(msg):
+def qemu_sweep(msg, kill = False):
     def get_qemu_processes():
         for proc in psutil.process_iter(['pid', 'name', 'username']):
             if proc.info['username'] == getpass.getuser():
                 if 'qemu-system-x86_64' in proc.info['name']:
-                    yield (proc.info['pid'])
+                    yield (proc, proc.info['pid'])
 
-    pids = [ p for p in get_qemu_processes() ]
+    procs = [ p for p in get_qemu_processes() ]
 
-    if (len(pids) > 0):
-        logger.warn(msg + " " + repr(pids))
+    if (len(procs) > 0):
+        if kill:
+            for proc in procs:
+                proc[0].kill()
+            logger.warn(msg)
+            
+        else:
+            logger.warn(msg + " " + repr([p[1] for p in procs]))
 
 # limit ourselves to CPUs not hogged by possible other qemu instances
 def filter_available_cpus():

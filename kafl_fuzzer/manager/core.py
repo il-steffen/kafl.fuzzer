@@ -75,6 +75,9 @@ def start(config):
     # Without -ip0, Qemu will not active PT tracing and we turn into a blind fuzzer
     if not config.ip0:
         logger.warn("No PT trace region defined.")
+    
+    if config.kill:
+        qemu_sweep("Old processes were killed.", True)
 
     cpus = filter_available_cpus()
     if num_worker > len(cpus):
