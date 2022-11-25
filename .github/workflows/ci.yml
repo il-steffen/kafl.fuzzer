@@ -19,6 +19,10 @@ jobs:
 
     - name: Check format
       run: make lint_check
+    
+    - name: REUSE Compliance Check
+      uses: fsfe/reuse-action@v1.2.0
+
 
   release:
     # this job makes an official Github release
